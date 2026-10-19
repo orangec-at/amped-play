@@ -1,0 +1,885 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Amped Web Viewer</title>
+<style>
+  :root { --bg: #1e2129; --fg: #e6e6e6; --muted: #8a8f9c; --panel: #2a2e38; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px system-ui, sans-serif; display: flex; height: 100vh; }
+  aside { width: 300px; padding: 12px; background: var(--panel); overflow: auto; box-sizing: border-box; }
+  main { flex: 1; position: relative; container-type: size; background: #000; }
+  /* the 640 x 480 screen (its drawing buffer at the RESOLUTION option's size) as the largest 4:3
+     box in the page, centred */
+  canvas { position: absolute; inset: 0; margin: auto; width: min(100cqw, 133.3333cqh); height: min(100cqh, 75cqw); display: block; cursor: grab; }
+  /* the overlays that belong to the 640 x 480 screen sit in the same 4:3 box, not in the bands
+     beside it: TestWorld.cover (#hud #cover) and the web-only result key hint (#result) */
+  #hud, #result { inset: 0; margin: auto; width: min(100cqw, 133.3333cqh); height: min(100cqh, 75cqw); }
+  label { display: block; margin: 12px 0 4px; color: var(--muted); }
+  select, input { width: 100%; }
+  #keys { margin-top: 12px; color: var(--fg); }
+  #pinfo { color: var(--muted); white-space: pre-wrap; font-size: 12px; }
+  #status { margin-top: 12px; color: var(--muted); white-space: pre-wrap; }
+  [hidden] { display: none !important; }
+  /* in-game HUD over the canvas */
+  #hud { position: absolute; pointer-events: none; font-weight: 600; text-shadow: 0 1px 2px #000; }
+  #hud .bar { position: absolute; top: 12px; left: 12px; display: flex; gap: 8px; align-items: center; }
+  #hud .meter { width: 220px; height: 12px; background: #0008; border: 1px solid #fff6; border-radius: 3px; overflow: hidden; }
+  #hud .meter i { display: block; height: 100%; background: linear-gradient(#7ef08a, #2fb04a); }
+  #hud #bossbox { position: absolute; top: 12px; right: 12px; display: flex; gap: 8px; align-items: center; }
+  #hud #bossbox .meter i { background: linear-gradient(#ff8a7a, #d23a2a); }
+  #hud #timer { position: absolute; top: 8px; left: 50%; transform: translateX(-50%); font-size: 26px; }
+  #hud #foes { position: absolute; top: 34px; left: 12px; font-size: 12px; opacity: .85; }
+  #hud #held { position: absolute; top: 52px; left: 12px; font-size: 12px; }
+  /* PlayerMeter panels in MeterContainer's 640x480 slots (y from the bottom) */
+  #hud #meters { position: absolute; inset: 0; }
+  /* TestWorld.cover (Cellophane): coverFadein's full-screen colour */
+  #hud #cover { position: absolute; inset: 0; }
+  #hud .pm { position: absolute; width: 20%; display: flex; flex-direction: column-reverse; gap: 2px; font-size: 11px; }
+  #hud .pm.long { width: 80%; }
+  #hud .pm .name { display: flex; justify-content: space-between; } #hud .pm.me .name { color: #ffd76a; }
+  #hud .pm .meter { width: auto; height: 8px; }
+  #hud .pm .meter.sub { height: 4px; } #hud .pm .meter.sub i { background: rgb(0, 128, 255); }
+  #hud .pm.foe .meter i { background: linear-gradient(#ff8a7a, #d23a2a); }
+  #hud .pm .say { align-self: flex-start; background: #f4f4ec; color: #111; text-shadow: none; padding: 3px 6px; border-radius: 4px; font-weight: 500; max-width: 100%; animation: say .3s ease-out; }
+  @keyframes say { from { transform: scale(.1, .2); } 50% { transform: scale(1, 1.2); } to { transform: scale(1); } }
+  @media (prefers-reduced-motion: reduce) { #hud .pm .say { animation: none; } }
+  #hud #msgs { position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); width: min(90%, 640px); text-align: center; }
+  #hud #msgs div { background: #000a; margin-top: 4px; padding: 4px 10px; border-radius: 4px; }
+  #result { position: absolute; display: grid; place-content: center; text-align: center; background: #0007; }
+  #result h1 { font-size: 56px; margin: 0; letter-spacing: 4px; }
+  /* the battle screen and the results are the original's 2D layer now (hud.rs over gfx2d);
+     the page keeps only the key hints */
+  #hud .bar, #hud #foes, #hud #held, #hud #timer, #hud #bossbox, #hud #msgs, #hud #meters, #result h1, #result img, #result pre { display: none !important; }
+  /* the hint (web-only, not in the original) sits just above MenuPanel's InfoBar (y 0 - 32 of
+     480) that the lobby results draw at the bottom of the screen */
+  /* web-only R / Enter hint: top-right corner, where the original result panels draw nothing (TitleBar(null)); the bottom is the InfoBar and the challenge TOTAL box sits just above it */
+  #result { place-content: start end; background: none; padding: 6px 12px; box-sizing: border-box; text-shadow: 0 1px 2px #000; }
+  #result p { margin: 6px 0; }
+  #result pre { margin: 10px auto; font: 15px/1.6 ui-monospace, Menlo, monospace; text-align: left; }
+  #result img { width: 256px; margin: 8px auto; image-rendering: pixelated; }
+  /* game menus over the canvas (TitlePanel, PlayerEditPanel, OptionPanel) */
+  /* "/" key help (web-only aid, not in the original) */
+  #help { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 8; background: #000d; color: #f2f2f2; padding: 20px 28px; border-radius: 8px; font: 15px/1.7 system-ui, sans-serif; width: min(520px, 92vw); box-sizing: border-box; }
+  #help h2 { margin: 0 0 8px; font-size: 18px; }
+  #help table { border-collapse: collapse; width: 100%; }
+  #help td { padding: 3px 0; vertical-align: top; } #help td:first-child { color: #f5b842; white-space: nowrap; padding-right: 16px; font-weight: 600; }
+  #help p { margin: 10px 0 0; color: #aab; font-size: 13px; }
+  /* Shutter: the VS screen while a stage loads (top: stage shot, me left, the boss mirrored right) */
+  #shutter { position: absolute; inset: 0; z-index: 6; display: grid; grid-template-rows: 1fr 1fr; background: #000; }
+  #shutter .top { position: relative; background: #3a3f4c; display: grid; place-items: center; overflow: hidden; }
+  #shutter .top .shot { width: 40%; }
+  #shutter .top .vs { position: absolute; bottom: 0; height: 100%; } #shutter .top .vs.r { right: -4%; transform: scaleX(-1); } #shutter .top .vs.l { left: -4%; }
+  #shutter .bottom { background: #23262e; display: grid; place-items: center; align-content: center; gap: 16px; position: relative; }
+  #shutter .bottom .name { position: absolute; top: 8px; right: 0; width: 40%; }
+  #shutter .bar { width: 33%; height: 6px; border: 1px solid #fff; background: #000; }
+  #shutter .bar i { display: block; height: 100%; width: 0; background: #4a7bd8; transition: width .3s; }
+  #shutter.hide .top { animation: up .4s .4s ease-in forwards; } #shutter.hide .bottom { animation: down .4s .4s ease-in forwards; }
+  @keyframes up { to { transform: translateY(-100%); } } @keyframes down { to { transform: translateY(100%); } }
+  #story { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; background: #000; color: #eee; z-index: 5; }
+  #story img.bg { max-width: 640px; width: 90vw; }
+  #story img.logo { position: absolute; top: 24px; left: 50%; translate: -50% 0; max-width: 320px; }
+  #story #stext { white-space: pre-line; margin: 16px auto; max-width: 640px; line-height: 1.7; }
+  @media (max-width: 700px) { body { flex-direction: column; } aside { width: 100%; height: 40vh; } }
+</style>
+</head>
+<body>
+<aside>
+  <strong>Amped Web Viewer</strong>
+  <label>1. 게임의 <code>resource</code> 폴더 선택 (브라우저 안에서만 읽음)</label>
+  <input id="dir" type="file" webkitdirectory>
+  <label>캐릭터 스타일</label>
+  <select id="style" disabled></select>
+  <label>바디</label>
+  <select id="body" disabled></select>
+  <label>얼굴</label>
+  <select id="face" disabled></select>
+  <label>머리 장식</label>
+  <select id="head" disabled></select>
+  <label>애니메이션 (player/anime/default.srt)</label>
+  <select id="anim">
+    <option value="0,0,0,1,0">정지 (frame 0)</option>
+    <option value="5,9,5,5,1" selected>걷기 walk.sc (5→9, 5fps)</option>
+    <option value="15,24,22,5,1">점프 jump.sc (15→24)</option>
+    <option value="155,155,155,4.5,0">가드 guard.sc (155)</option>
+    <option value="all">전체 타임라인 (24fps)</option>
+  </select>
+  <label>맵 (.md / .mpv)</label>
+  <select id="map" disabled></select>
+  <label>또는 임의의 .shp / .prm</label>
+  <select id="any" disabled></select>
+  <div id="keys" hidden><span id="keyline"></span>
+    <label>스크립트 실행 (테스트용)</label>
+    <select id="script"></select>
+    <pre id="pinfo"></pre>
+  </div>
+  <div id="status">resource 폴더를 선택하세요.</div>
+</aside>
+<main><canvas id="c"></canvas>
+  <div id="hud" hidden>
+    <div class="bar">HP <div class="meter"><i id="hpbar"></i></div><span id="hptext"></span></div>
+    <div id="foes"></div>
+    <div id="held"></div>
+    <div id="timer"></div>
+    <div id="bossbox" hidden><span id="bossname"></span><div class="meter"><i id="bossbar"></i></div></div>
+    <div id="msgs"></div>
+    <div id="meters"></div>
+    <div id="cover"></div>
+  </div>
+  <div id="help" hidden><h2>조작</h2><table><tbody id="helprows"></tbody></table><p>/ 또는 ? : 이 도움말 열고 닫기 · Esc : 닫기</p></div>
+  <div id="shutter" hidden><div class="top"><img class="shot" id="shshot" alt=""><img class="vs r" id="shvs" alt=""></div><div class="bottom"><img class="name" id="shname" alt=""><div class="bar"><i id="shbar"></i></div></div></div>
+  <div id="story" hidden><img class="logo" id="slogo" hidden><img class="bg" id="sbg"><div id="stext"></div><p id="skeys"></p></div>
+  <div id="result" hidden><h1 id="rtitle"></h1><img id="rimg" hidden><pre id="rsub"></pre><p id="rkeys"></p></div>
+</main>
+<script type="module">
+import init, { Viewer, model_name, map_layer_paths, check_map_path, resolution, default_reso } from './pkg/amped_web.js';
+window.__wasm = await init(); // dev: __wasm.memory.buffer.byteLength
+
+const $ = id => document.getElementById(id);
+const canvas = $('c');
+const viewer = new Viewer(canvas);
+window.viewer = viewer; // dev/test access
+let files = new Map(); // "player/body/9/body.shp" -> () => Promise<ArrayBuffer>
+let yaw = 0.6, pitch = 0.2;
+
+const bytes = async p => files.has(p) ? new Uint8Array(await files.get(p)()) : null;
+const status = t => $('status').textContent = t;
+const fill = (sel, items, blank) => {
+  sel.innerHTML = (blank ? '<option value="">(없음)</option>' : '') + items.map(i => `<option>${i}</option>`).join('');
+  sel.disabled = !items.length;
+};
+
+$('dir').onchange = e => {
+  files = new Map();
+  for (const f of e.target.files) {
+    const parts = f.webkitRelativePath.split('/');
+    files.set(parts.slice(1).join('/'), () => f.arrayBuffer()); // drop the chosen folder's own name
+  }
+  loaded();
+};
+
+// items: every .ioa, the action .poa they turn a holder into, the skeleton sets, and the
+// GameSetting name table (loaded once)
+let commonLoading = null;
+const roster = new Map(); // "npc:<name>" -> { name, pd (its PlayerData), body, face, head }
+function loadCommon() {
+  return commonLoading ??= (async () => {
+    const all = (re, f) => Promise.all([...files.keys()].filter(k => re.test(k)).map(async k => f('/' + k, await bytes(k))));
+    await all(/^item\/.*\.ioa$/, (p, b) => viewer.add_item(p, b));
+    await all(/^player\/(action|special)\/.*\.poa$/, (p, b) => viewer.add_action(p, b));
+    await all(/^player\/anime\/.*\.srt$/, (p, b) => viewer.add_structure(p, b));
+    if (files.has('setting.set')) viewer.set_setting(await bytes('setting.set'));
+    // the package's UserData list: each style's look until one is saved here
+    if (files.has('userdata')) try { viewer.set_default_userdata(await bytes('userdata')); } catch (e) { console.warn('userdata', e); }
+    // outfits: PlayerEditPanel takes the files in outfit/ (ResourceManager.getList("/outfit"))
+    // whose names end in .od and that are OutfitData; then their parts' views and PlayerData
+    await all(/^outfit\/[^/]+\.od$/, async (p, b) => {
+      try {
+        for (const q of viewer.add_outfit(p, b).split('\n').filter(Boolean)) {
+          const qb = await bytes(q.replace(/^\//, ''));
+          if (!qb) { console.warn(`outfit ${p}: 없음 ${q}`); continue; }
+          if (q.endsWith('.poa')) viewer.add_action(q, qb); else viewer.add_outfit_view(q, qb);
+        }
+      } catch (e) { console.warn(`outfit ${p}: ${e}`); }
+    });
+    // Deviation (not in the original): every map's named NPCs, playable from the edit screen's
+    // STYLE list (after the styles) and the dev sidebar's style select ("npc:<NPCData.name>")
+    await all(/^map\/[^/]+\.md$/, (p, b) => { try { viewer.add_roster_map(p, b); } catch (e) { console.warn(`roster ${p}: ${e}`); } });
+    for (const l of viewer.npc_roster().split('\n').filter(Boolean)) {
+      const [key, name, pd, body, face, head] = l.split('\t').map(x => x.replace(/^\//, ''));
+      // outfit: its NPCData.taste OUTFIT ("/outfit/<name>.od" as the map names it, "" none)
+      roster.set(key, { name, pd, body, face, head, outfit: l.split('\t')[7] || '' });
+      $('style').append(new Option(`NPC ${name}`, key));
+    }
+    // the choice saved last (Game.currentstyle) is what a map from the dev sidebar plays too
+    const cur = store('currentstyle', null);
+    if (cur && cur !== $('style').value && [...$('style').options].some(o => o.value === cur)) {
+      const u = user(cur);
+      $('style').value = cur; fillParts();
+      $('body').value = u.body; $('face').value = u.face; $('head').value = u.head;
+    }
+    window.__itemsLoaded = true;
+  })();
+}
+
+function loaded() {
+  const styles = [...new Set([...files.keys()].filter(k => k.startsWith('player/style/')).map(k => k.split('/')[2]))].sort();
+  fill($('style'), styles);
+  fill($('any'), [...files.keys()].filter(k => /\.(shp|prm)$/.test(k)).sort(), true);
+  fill($('map'), [...files.keys()].filter(k => /^map\/.*\.md$|^mpv\/.*\.mpv$/.test(k)).sort(), true);
+  status(`${files.size}개 파일 로드`);
+  // Dict: Korean names and lines
+  if (files.has('dic_ko.unicode')) bytes('dic_ko.unicode').then(b => b && viewer.set_dictionary(b));
+  // gfx2d (GLEngine 2D): every component / rule texture, by its resource path
+  for (const k of files.keys()) if (/^(component|rule)\/.*\.tex$/.test(k)) bytes(k).then(b => { try { b && viewer.load_ui_texture('/' + k, b); } catch (e) { console.warn(k, e); } });
+  $('style').onchange();
+};
+
+$('style').onchange = () => { fillParts(); showCharacter(); };
+// the style's body / face / head lists
+function fillParts() {
+  const s = $('style').value, pre = `player/style/${s}/`;
+  const list = (sub, ext) => [...files.keys()].filter(k => k.startsWith(pre + sub + '/') && k.endsWith(ext)).map(k => k.slice(pre.length + sub.length + 1)).sort();
+  fill($('body'), list('body', '.body'));
+  fill($('face'), list('face', '.face'));
+  fill($('head'), list('head', '.prm'), true);
+}
+for (const id of ['body', 'face', 'head']) $(id).onchange = showCharacter;
+$('any').onchange = async () => {
+  const p = $('any').value;
+  if (!p) return showCharacter();
+  viewer.clear();
+  try { viewer.add(await bytes(p), null, null); status(p); } catch (e) { status(`${p}: ${e}`); }
+};
+
+// attacks, effects and particles every map shares: fetched and parsed by the first map only (the
+// viewer keeps them across maps; each stage used to fetch and parse all ~150 files again)
+let worldLoading = null;
+function loadWorldCommon() {
+  return worldLoading ??= (async () => {
+    // PlayerData.Attack.attackmodel names an /attack/*.aoa hit sphere
+    const aoa = [...files.keys()].filter(k => /^attack\/[^/]+\.aoa$/.test(k));
+    // attack.sc / end.sc name shapes, textures and particles of the .aoa's own resources: kept
+    // under the .aoa's path (BasicModel.getResource: a bare name is the model's own ObjectData's,
+    // a path the file), so the same name in two files never mixes, whatever loads first
+    await Promise.all(aoa.map(async k => { const b = await bytes(k); viewer.add_attack_data(k.split('/').pop(), b); viewer.add_object_resources('/' + k, b); }));
+    // hit sparks: /effect/hit/<n>.oa scripts
+    await Promise.all([...files.keys()].filter(k => /^effect\/hit\/\d+\.oa$/.test(k)).map(async k => viewer.add_hit_effect(+k.match(/(\d+)\.oa$/)[1], await bytes(k))));
+    // standalone textures and shapes, by path (setBillBoard("/effect/hit/hit.tex"),
+    // setShape("/effect/jet.shp"), shockbone.oa's setShape("/player/body/1/bone.shp"))
+    await Promise.all([...files.keys()].filter(k => /^effect\/.*\.tex$/.test(k)).map(async k => viewer.add_effect_texture('/' + k, await bytes(k))));
+    await Promise.all([...files.keys()].filter(k => /^effect\/[^/]+\.shp$/.test(k) || k === 'player/body/1/bone.shp').map(async k => viewer.add_effect_shape('/' + k, await bytes(k))));
+    await Promise.all([...files.keys()].filter(k => /^(effect|attack)\/.*\.oa$/.test(k)).map(async k => { const b = await bytes(k); viewer.add_object_resources('/' + k, b); viewer.add_effect_model('/' + k, b); }));
+    // particles by path (a bare name is its owner's: the resources above, a PlayerData's own)
+    await Promise.all([...files.keys()].filter(k => /\.ptc$/.test(k)).map(async k => viewer.add_particle('/' + k, await bytes(k))));
+  })().catch(e => { worldLoading = null; throw e; });
+}
+
+let playing = false; // a .md is loaded: the character walks on it
+// Every showMap / showCharacter starts a new load; an older one still waiting on a file stops at its
+// next await instead of adding its look to the new load's models. (The menus start several in a
+// row: an old look landing in model 0 after the stage's clear() put a second face / head into the
+// draws a released head (namakubi) and the player use.)
+let loadGen = 0;
+const STALE = Symbol('stale load');
+const loader = () => {
+  const gen = ++loadGen, check = () => { if (gen !== loadGen) throw STALE; };
+  return Object.assign(async q => { const b = await bytes(q); check(); return b; }, { check });
+};
+$('map').onchange = showMap;
+async function showMap() {
+  const p = $('map').value;
+  if (story.on) showShutter(p);
+  audio?.suspend(); // playSound resumes it with the stage's first sound
+  playing = false; $('keys').hidden = true; $('hud').hidden = true; $('result').hidden = true;
+  closeMenu(); // a map picked from the dev sidebar closes the menus
+  if (!p) return showCharacter();
+  const get = loader();
+  viewer.clear();
+  // BasicLobby: a challenge tour's total and bring string carry over only to its next stage
+  // (any other map, loaded however, starts afresh)
+  if (p !== carryChallenge) { viewer.challenge_reset(); carryChallenge = null; }
+  const log = [p];
+  try {
+    const md = await get(p);
+    const need = async q => { const b = await get(q); if (!b) throw `없음: ${q}`; log.push(`→ ${q}`); return b; };
+    if (p.endsWith('.md')) try { viewer.add_map_resources(md); } catch {} // its objects' own resources: a woodbox's smoke.ptc
+    // MapData.Layer.attach(): each layer's view, in a separate .mpv or embedded in the .md
+    const layers = map_layer_paths(md);
+    if (!layers.length) viewer.add(md, null, null);
+    for (const [i, q] of layers.entries()) viewer.add_map_layer(i, q ? await need(q) : md);
+    if (p.endsWith('.md')) {
+      const chk = check_map_path(md); // MapData.getCheckMap()
+      // items: every .ioa, the action .poa they turn a holder into, the skeleton sets, the
+      // GameSetting name table and the NPC roster (loaded once)
+      await loadCommon();
+      get.check();
+      // dev cheat (not in the original): ?god = no damage. ?god=<style folder | npc:<name>> plays
+      // that; a bare ?god plays the NPC chosen in the edit screen if one is, else the fighter
+      // (kakutoum); without ?god, the style (or NPC) chosen
+      const god = new URLSearchParams(location.search).get('god');
+      const pick = $('style').value;
+      const myStyle = god === null ? pick : (god || (roster.has(pick) ? pick : 'kakutoum'));
+      if (myStyle !== pick && [...$('style').options].some(o => o.value === myStyle)) {
+        // the look drawn for me is that style's (or NPC's) too
+        const u = user(myStyle);
+        $('style').value = myStyle; fillParts();
+        $('body').value = u.body; $('face').value = u.face; $('head').value = u.head;
+      }
+      await addCharacter(log, get);
+      const npc = roster.get(myStyle);
+      viewer.set_god(god !== null);
+      const myPoa = await need(npc ? npc.pd : `player/style/${myStyle}/player.poa`);
+      // Deviation: a map NPC as me (npc.rs Roster, Viewer::set_my_npc) — its PlayerData and
+      // NPCData status, no outfit
+      viewer.set_my_npc(npc ? myStyle : '', myPoa);
+      viewer.set_my_style(npc ? '' : `/player/style/${myStyle}`);
+      viewer.set_my_outfit(npc ? '' : user(myStyle).outfit);
+      viewer.set_map_name(p); // nav door fixes (tour4_3)
+      viewer.set_world(chk ? await need(chk) : md, myPoa, md, performance.now());
+      // PlayerUtil.getPlayerScripts: /player/common/*.sc back up the style's own scripts
+      const common = [...files.keys()].filter(k => /^player\/common\/[^/]+\.sc$/.test(k)).sort();
+      await Promise.all(common.map(async k => viewer.add_common_script(k.split('/').pop(), await get(k))));
+      // PlayerUtil.getDekaScripts: /player/dekachara/*.sc go in front of those for a DEKA character
+      const deka = [...files.keys()].filter(k => /^player\/dekachara\/[^/]+\.sc$/.test(k)).sort();
+      await Promise.all(deka.map(async k => viewer.add_deka_script(k.split('/').pop(), await get(k))));
+      log.push(`공용 스크립트 ${common.length}개 · 거대 캐릭터 ${deka.length}개`);
+      await loadWorldCommon();
+      get.check();
+      fill($('script'), common.map(k => k.split('/').pop()), true);
+      // MapData.characterList NPCs (NPCData: style data + look); empty playerdata = my style/look.
+      // All are loaded now; the rule spawns them at the start or when an event asks.
+      const npcs = viewer.npc_list().split('\n');
+      let n = 0;
+      for (const [i, line] of npcs.entries()) {
+        if (!line) continue;
+        const [pd, body, face, head] = line.split('\t').map(x => x.replace(/^\//, ''));
+        try {
+          let model = 0, poa = myPoa;
+          if (pd) {
+            poa = await need(pd);
+            model = viewer.begin_model();
+            await addLook(body, face, head, log, get);
+          }
+          viewer.add_npc_template(i, poa, model);
+          n++;
+        } catch (e) { if (e === STALE) throw e; log.push(`NPC ${i}: ${e}`); }
+      }
+      // PlayerForm.setBody (changeBody, armorbrake.sc): the bodies the characters' scripts may
+      // change to, each as a model of its own (body.shp and hands with that .body's texture)
+      for (const b of viewer.script_bodies().split('\n')) {
+        if (!b.startsWith('/')) continue; // ponytail: a style-relative body name isn't resolved
+        try {
+          const m = viewer.begin_model();
+          await addLook(b.slice(1), '', '', log, get);
+          viewer.set_body_model(b, m);
+        } catch (e) { if (e === STALE) throw e; log.push(`${b}: ${e}`); }
+      }
+      viewer.set_story_total(story.on ? story.total : 0); // GameResultPanel's starting total
+      viewer.begin(performance.now());
+      $('hud').hidden = false;
+      story.counted = false;
+      clockAt = null;
+      // Player login: UserData.equipment comes in hand (story stages)
+      const eq = story.on && user().equipment;
+      if (eq) try { viewer.equip_me(eq); } catch (e) { log.push(`장비: ${e}`); }
+      hideShutter();
+      const npcs_len = n;
+      log.push(`NPC ${npcs_len}명 준비`);
+      playing = true; $("keys").hidden = false;
+      document.activeElement.blur(); // keys go to the game, not the select
+    }
+  } catch (e) { if (e === STALE) return; log.push(`오류: ${e}`); }
+  status(log.join('\n'));
+}
+
+async function showCharacter() {
+  if ($('map').value) return showMap();
+  const get = loader();
+  viewer.clear();
+  const log = [];
+  try { await addCharacter(log, get); } catch (e) { if (e === STALE) return; throw e; }
+  status(log.join('\n'));
+}
+
+// PlayerForm: body shape + skin, face -> slot 1, head -> slot 14 (into the current model)
+// PlayerBody.setBodyShape: the chop and point hands beside body.shp, for changeHand, and the
+// body's bone.shp for setBone
+async function addHands(body, log, get = bytes) {
+  const dir = `player/body/${model_name(body)}`;
+  for (const [f, left, kind] of [['rchop', false, 1], ['lchop', true, 1], ['rpoint', false, 2], ['lpoint', true, 2]]) {
+    const prm = await get(`${dir}/${f}.prm`);
+    if (prm) try { viewer.add_hand(prm, body, left, kind); } catch (e) { log.push(`${dir}/${f}.prm: ${e}`); }
+  }
+  // PlayerForm.boneshape: <body dir>/bone.shp, drawn instead while setBone(true)
+  const bone = await get(`${dir}/bone.shp`);
+  if (bone) try { viewer.add_bone(bone); } catch (e) { log.push(`${dir}/bone.shp: ${e}`); }
+}
+async function addLook(bodyPath, facePath, headPath, log, get = bytes) {
+  const add = async (shapePath, skin, slot) => {
+    const shp = await get(shapePath);
+    if (!shp) return log.push(`없음: ${shapePath}`);
+    try { viewer.add(shp, skin, slot); } catch (e) { log.push(`${shapePath}: ${e}`); }
+  };
+  const body = bodyPath && await get(bodyPath);
+  if (body) { await add(`player/body/${model_name(body)}/body.shp`, body, null); await addHands(body, log, get); }
+  const face = facePath && await get(facePath);
+  if (face) await add(`player/face/${model_name(face)}/1.prm`, face, 1);
+  if (headPath) await add(headPath, null, 14);
+}
+
+async function addCharacter(log, get = bytes) {
+  const s = $('style').value; if (!s) return;
+  const npc = roster.get(s);
+  if (npc) {
+    // Deviation: a map NPC chosen as my style: its NPCData look, and its PlayerData (whose own
+    // model, if any, the preview and the game draw instead of the look)
+    await addLook(npc.body, npc.face, npc.head, log, get);
+    const srt = await get('player/anime/default.srt');
+    if (srt) viewer.set_structure(srt);
+    const poa = await get(npc.pd);
+    if (poa) viewer.set_my_npc(s, poa);
+    log.push(`NPC ${npc.name}: ${npc.pd}`);
+    // Player(world, NPCData): its own taste OUTFIT, not UserData.outfit
+    viewer.wear_outfit(npc.outfit);
+    return startAnim();
+  }
+  viewer.set_my_npc('', new Uint8Array());
+  const add = async (shapePath, skin, slot) => {
+    const shp = await get(shapePath);
+    if (!shp) return log.push(`없음: ${shapePath}`);
+    try { viewer.add(shp, skin, slot); log.push(shapePath); } catch (e) { log.push(`${shapePath}: ${e}`); }
+  };
+  const body = await get(`player/style/${s}/body/${$('body').value}`);
+  if (body) { await add(`player/body/${model_name(body)}/body.shp`, body, null); await addHands(body, log, get); }
+  const face = await get(`player/style/${s}/face/${$('face').value}`);
+  if (face) await add(`player/face/${model_name(face)}/1.prm`, face, 1); // PlayerForm: face -> slot 1
+  if ($('head').value) await add(`player/style/${s}/head/${$('head').value}`, null, 14); // head -> slot 14
+  const srt = await get('player/anime/default.srt');
+  if (srt) { viewer.set_structure(srt); log.push(`skeleton: ${viewer.frame_count()} frames`); }
+  // PlayerEditPanel.setOutfit / PlayerView: UserData.outfit worn on my look
+  await loadCommon();
+  viewer.wear_outfit(user(s).outfit);
+  startAnim();
+}
+
+// Port of onstage.gfx.Animation.getFrame(): speed is frames per second.
+let anim = null;
+function startAnim(v = $('anim').value) {
+  const [st, et, lt, sp, loop] = v === 'all' ? [0, viewer.frame_count(), 0, 24, 1] : v.split(',').map(Number);
+  anim = { st, et, lt, speed: sp * 0.001, loop: !!loop, t0: performance.now() };
+}
+$('anim').onchange = () => startAnim();
+function animFrame() {
+  if (!anim) return 0;
+  const f = (performance.now() - anim.t0) * anim.speed;
+  if (f > anim.et - anim.st) {
+    if (!anim.loop || anim.et === anim.lt) return anim.et;
+    const f2 = f - (anim.et - anim.st);
+    return f2 - (anim.et - anim.lt) * Math.floor(f2 / (anim.et - anim.lt)) + anim.lt;
+  }
+  return anim.st + f;
+}
+
+// Orbit camera.
+let drag = null;
+canvas.onpointerdown = e => { drag = [e.clientX, e.clientY]; canvas.setPointerCapture(e.pointerId); };
+canvas.onpointerup = () => drag = null;
+canvas.onpointermove = e => {
+  if (!drag) return;
+  yaw -= (e.clientX - drag[0]) * 0.01;
+  pitch = Math.max(-1.4, Math.min(1.4, pitch + (e.clientY - drag[1]) * 0.01));
+  drag = [e.clientX, e.clientY];
+};
+// Keyboard play: held keys go to Viewer.update_buttons (CtrlDevice/Controller port in Rust). The
+// button keys are Config.Key.keyboard in the viewer (the options' CONTROL box sets them, the
+// saved config brings them back; defaults jump V, attack1 C, attack2 X, aim Z); the cursor is the
+// arrow keys.
+const keys = new Set();
+const isGameKey = code => viewer.key_buttons(code) !== 0;
+addEventListener('keydown', e => {
+  if (!playing || e.target.closest?.('select,input')) return;
+  keys.add(e.code);
+  if (e.code.startsWith('Arrow') || isGameKey(e.code)) e.preventDefault();
+});
+addEventListener('keyup', e => keys.delete(e.code));
+$('script').onchange = () => {
+  const n = $('script').value;
+  if (n && !viewer.run_script(n)) status(`없는 스크립트: ${n}`);
+  $('script').blur();
+};
+let infoAt = 0;
+function play(now) {
+  const k = (...c) => c.some(x => keys.has(x));
+  // CtrlDevice cursor bits: up=1 right=2 down=4 left=8
+  const mask = (k('ArrowUp') ? 1 : 0) | (k('ArrowRight') ? 2 : 0) | (k('ArrowDown') ? 4 : 0) | (k('ArrowLeft') ? 8 : 0);
+  let buttons = 0;
+  for (const c of keys) buttons |= viewer.key_buttons(c);
+  viewer.update_buttons(mask, buttons, now);
+  if (now > infoAt) { infoAt = now + 200; $('pinfo').textContent = viewer.player_info(); }
+}
+
+// Sound: SoundResource PCM -> AudioBuffer (cached). The context starts with the first sound after a
+// key (sticky user activation), not on the first key, and is suspended while a stage loads: an idle
+// running AudioContext through the menus and the stage load stalled the page's fetches (prologue
+// image, stage files) until the tab died in headless tests on a swapping machine.
+let audio = null;
+const sounds = new Map();
+async function playSound(path, vol, pitch) {
+  if (navigator.userActivation && !navigator.userActivation.hasBeenActive) return;
+  audio ??= new AudioContext();
+  if (audio.state === 'suspended') audio.resume();
+  let buf = sounds.get(path);
+  if (buf === undefined) {
+    sounds.set(path, null);
+    const b = await bytes(path);
+    if (!b) return;
+    const d = viewer.decode_sound(b), ch = d[0], rate = d[1], n = (d.length - 2) / ch | 0;
+    buf = audio.createBuffer(ch, n, rate);
+    for (let c = 0; c < ch; c++) { const o = buf.getChannelData(c); for (let i = 0; i < n; i++) o[i] = d[2 + i * ch + c]; }
+    sounds.set(path, buf);
+  }
+  if (!buf) return;
+  const src = audio.createBufferSource(), g = audio.createGain();
+  src.buffer = buf; src.playbackRate.value = pitch || 1; g.gain.value = Math.min(1, vol);
+  src.connect(g).connect(audio.destination); src.start();
+}
+
+// GaidenManager: prologue -> stages -> GameResultPanel totals -> epilogue; a game over spends a
+// credit (Config.SinglePlay.credit 0 -> CREDIT[0] = 2) and restarts the stage with the score reset.
+const story = { on: false, total: 0, credits: 2, counted: false };
+// Config.SinglePlay: credit index {2, 5, 9} and turbo (Sys.setTimeScale) {1.0, 1.2, 1.4}
+const CREDIT = [2, 5, 9], TURBO = [1.0, 1.2, 1.4];
+const store = (k, d) => { try { return JSON.parse(localStorage.getItem('amped.' + k)) ?? d; } catch { return d; } };
+const save = (k, v) => { try { localStorage.setItem('amped.' + k, JSON.stringify(v)); } catch {} };
+let config = store('config', { credit: 0, turbo: 0 });
+// Config.Key.keyboard as saved (conf/config's "control"): config.keys, five kwt keys
+viewer.set_control_keys(Array.isArray(config.keys) ? config.keys.join(',') : '');
+// Config.Graphics as saved: OUTLINE, SHADOW (ViewModel.hasshadow); RESOLUTION is read by frame()
+viewer.set_outlines(!!(config.outline ?? 1));
+viewer.set_shadows(!!(config.shadow ?? 1));
+// the "/" help and the sidebar line name the keys in force (web-only aids)
+function showKeys() {
+  const n = Object.fromEntries(viewer.control_keys().split('\n').map(l => { const [k, , name] = l.split('\t'); return [k, name]; }));
+  const esc = t => t.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+  const rows = [
+    ['방향키', '이동 (같은 방향 두 번: 대시) · 메뉴 커서'],
+    [n.jump, '점프 (짧게 누르면 낮게) · 메뉴 결정'],
+    [n.attack1, '공격 1 · 아이템 줍기 · 탈것 타기 · 메뉴 취소'],
+    [n.attack2, '공격 2'],
+    [`${n.attack1} + ${n.attack2}`, '막기'],
+    [`${n.aim} (누른 채)`, '조준 (가까운 적을 자동으로 겨냥)'],
+    [`조준 중 ${n.attack1} + ${n.attack2}`, '필살기 · 탈것에서 내리기'],
+    ['R', '결과 화면에서 다시 하기 · 이어하기'],
+    ['Enter', '타이틀 메뉴 결정 · 스토리 넘기기 · 다음 스테이지'],
+  ];
+  $('helprows').innerHTML = rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('');
+  $('keyline').textContent = `방향키: 이동 (같은 방향 두 번: 대시) · ${n.jump}: 점프 (짧게 누르면 낮게) · ${n.attack1}: 공격1 · ${n.attack2}: 공격2 · ${n.attack1}+${n.attack2}: 막기 · ${n.aim} (누른 채): 조준 · 조준 중 ${n.attack1}+${n.attack2}: 필살기`;
+}
+showKeys();
+let menu = false; // the menus (MenuPanel) are up
+// game clock: Sys.setTimeScale makes the world run turbo times faster
+let clockAt = null, gameClock = 0;
+function clock(real) {
+  if (clockAt === null) { clockAt = real; gameClock = real; }
+  gameClock += (real - clockAt) * TURBO[config.turbo]; clockAt = real;
+  return gameClock;
+}
+let paused = false;
+// a .tex as an image URL: rows flipped (GL keeps them bottom up), cropped to the part
+// GLEngine.drawImage(tex, 0, 0, cw, ch, ...) shows
+async function texURL(path, cw, ch) {
+  const b = await bytes(path); if (!b) return '';
+  const d = viewer.texture_rgba(b), w = d[0] | d[1] << 8 | d[2] << 16 | d[3] << 24, h = d[4] | d[5] << 8 | d[6] << 16 | d[7] << 24;
+  cw = Math.min(cw || w, w); ch = Math.min(ch || h, h);
+  const c = Object.assign(document.createElement('canvas'), { width: cw, height: ch }), x = c.getContext('2d');
+  const img = x.createImageData(cw, ch);
+  for (let y = 0; y < ch; y++) img.data.set(d.subarray(8 + ((h - 1 - y) * w) * 4, 8 + ((h - 1 - y) * w + cw) * 4), y * cw * 4);
+  x.putImageData(img, 0, 0);
+  return c.toDataURL();
+}
+// ProloguePanel. Its STORY1..9 lines aren't in this package's dictionary (the original would show
+// the bare keys), so only the picture and the logo are shown.
+async function showPrologue() {
+  paused = true;
+  $('sbg').src = await texURL('component/gaiden/prologue.tex', 512, 427);
+  $('slogo').src = await texURL('component/gaiden/logo.tex'); $('slogo').hidden = false;
+  $('stext').textContent = '';
+  $('skeys').textContent = 'Enter: 시작';
+  $('story').hidden = false;
+  story.mode = 'prologue';
+}
+async function showEpilogue() {
+  paused = true;
+  $('sbg').src = await texURL('component/gaiden/goodend.tex', 512, 360); $('slogo').hidden = true;
+  $('stext').textContent = viewer.epilogue_lines() + `\n\nTOTAL ${story.total}`;
+  $('skeys').textContent = 'Enter: 처음으로';
+  music('menu.mp3'); // AmpedContainer 1002: EpiloguePanel with AmpedMusic.play(0)
+  $('story').hidden = false;
+  story.mode = 'epilogue';
+}
+// GaidenManager.boss: the stage's boss Character on the shutter's right
+const BOSS = ['core', 'omusa', 'taisa', 'bon', 'bob'];
+async function showShutter(p) {
+  const n = +(/stage(\d+)\.md$/.exec(p) || [])[1];
+  if (!n) return;
+  story.stage = n; music(null); // TestWorld: AmpedMusic.play("NONE") while the stage loads
+  const sh = $('shutter'); sh.classList.remove('hide'); sh.hidden = false; $('shbar').style.width = '0';
+  const b = BOSS[n - 1];
+  $('shshot').src = files.has(`preview/stage${n}/stageshot.tex`) ? await texURL(`preview/stage${n}/stageshot.tex`, 256, 128) : '';
+  $('shvs').src = b && files.has(`component/gaiden/${b}/vs.tex`) ? await texURL(`component/gaiden/${b}/vs.tex`) : '';
+  $('shname').src = b && files.has(`component/gaiden/${b}/name.tex`) ? await texURL(`component/gaiden/${b}/name.tex`, 256, 32) : '';
+}
+// AmpedMusic.play -> XAudio: one looping mp3 from the package's music folder (?music=<url>,
+// default ./music); null = NONE. Browsers block sound before the first key, so retry then.
+const bgm = window.__bgm = Object.assign(new Audio(), { loop: true }); // dev: __bgm
+const musicUrl = new URLSearchParams(location.search).get('music') ?? 'music';
+let bgmWant = null;
+function music(name) {
+  bgmWant = name;
+  if (!name) { bgm.pause(); return; }
+  const src = new URL(`${musicUrl}/${name}`, location.href).href;
+  if (bgm.src !== src) bgm.src = src;
+  bgm.play().catch(() => {});
+}
+addEventListener('keydown', () => { if (bgmWant && bgm.paused) music(bgmWant); if (playing && audio?.state === 'suspended') audio.resume(); });
+function hideShutter() {
+  const sh = $('shutter'); if (sh.hidden) return;
+  $('shbar').style.width = '100%'; sh.classList.add('hide');
+  // TestWorld: the shutter opens with AmpedMusic.play(currentstage + 1) in the story
+  if (story.on && story.stage) music(`stage${story.stage}.mp3`);
+  setTimeout(() => { sh.hidden = true; sh.classList.remove('hide'); }, 1000);
+}
+function restartStory() { story.on = false; hud = {}; playing = false; $('hud').hidden = true; showTitle(); }
+addEventListener('keydown', e => {
+  if ($('story').hidden || e.code !== 'Enter') return;
+  e.preventDefault(); // see GAME START below: an Enter left to its default action
+  $('story').hidden = true; paused = false;
+  if (story.mode === 'prologue') { Object.assign(story, { on: true, total: 0, credits: CREDIT[config.credit] }); hud = {}; showMap(); }
+  else restartStory();
+});
+
+// MeterContainer.X / Y slots: allies take 0-3 (left), the rest 4-7 (right); the boss's meter is
+// the long one at (64, 360). Coordinates are in the original's 640x480 screen, y up from the bottom.
+const MX = [16, 152, 16, 152, 360, 496, 360, 496], MY = [48, 48, -8, -8, 48, 48, -8, -8];
+function drawMeters(ms) {
+  let ally = 0, foe = 4;
+  const html = ms.map(m => {
+    let x, y, cls = 'pm' + (m.me ? ' me' : '') + (m.ally ? '' : ' foe');
+    if (m.boss) { x = 64; y = 360; cls += ' long'; }
+    else { const k = m.ally ? ally++ : foe++; if (k > 7 || (m.ally && k > 3)) return ''; x = MX[k]; y = MY[k] + 8; }
+    const esc = t => t.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+    return `<div class="${cls}" style="left:${x / 6.4}%;bottom:${Math.max(0, y) / 4.8}%">` +
+      `<div class="meter"><i style="width:${100 * m.hp / Math.max(1, m.max)}%"></i></div>` +
+      // PlayerMeter.itemmeter: a thin blue bar under the HP one (held item's HP, else MP / 250)
+      `<div class="meter sub"><i style="width:${100 * (m.sub || 0) / Math.max(1, m.submax || 1)}%"></i></div>` +
+      `<div class="name"><span>${esc(m.name)}</span><span>${m.hp}</span></div>` +
+      (m.say ? `<div class="say">${esc(m.say)}</div>` : '') + '</div>';
+  }).join('');
+  if ($('meters').innerHTML !== html) $('meters').innerHTML = html;
+}
+
+let hud = {};
+let resultShown = false;
+window.__drawHud = () => drawHud(); // dev: headless pages barely run requestAnimationFrame
+function drawHud() {
+  try { hud = JSON.parse(viewer.hud()); } catch { return; }
+  if (!hud.phase) return;
+  $('hpbar').style.width = `${100 * hud.hp / hud.maxhp}%`;
+  $('hptext').textContent = `${hud.hp} / ${hud.maxhp}`;
+  const t = hud.time;
+  $('timer').textContent = `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+  $('foes').textContent = hud.foes ? `남은 적 ${hud.foes_alive} / ${hud.foes}` : '';
+  // versus rules: TestWorld's target counts (count1 / count2 against the wanted ones)
+  const vs = hud.versus;
+  if (vs) $('foes').textContent = vs.rule === 'duel' ? `레드 ${'●'.repeat(vs.count[0])}${'○'.repeat(Math.max(0, vs.want[0] - vs.count[0]))}  블루 ${'●'.repeat(vs.count[1])}${'○'.repeat(Math.max(0, vs.want[1] - vs.count[1]))}`
+    : vs.rule === 'dogfight' ? `킬 ${vs.count[0]} / ${vs.want[0]} · 남은 부활 ${vs.count[1]}`
+    // ball rules: goals / broken targets per team (SingleBreakBall: one shared count)
+    : ['soccer', 'volley', 'baske', 'ball1'].includes(vs.rule) ? (vs.want[1] ? `레드 ${vs.count[0]} · 블루 ${vs.count[1]} / ${vs.want[0]}` : `부순 공 ${vs.count[0]} / ${vs.want[0]}`)
+    // TestWorld.notifyTargetCount for the flag rules: flags brought in / getTargetCount
+    : vs.rule === 'flag' ? (vs.team ? `깃발 레드 ${vs.count[0]} · 블루 ${vs.count[1]} / ${vs.want[0]}` : `깃발 ${vs.count[0]} / ${vs.want[0]}`)
+    : `남은 참가자 ${vs.rows.filter(r => !r.dead).length} / ${vs.rows.length}`;
+  $('held').textContent = hud.item ? `🔧 ${hud.item.name} (내구 ${hud.item.hp} / ${hud.item.max})` : '';
+  $('bossbox').hidden = !hud.boss;
+  if (hud.boss) { $('bossname').textContent = hud.boss.name; $('bossbar').style.width = `${100 * hud.boss.hp / hud.boss.maxhp}%`; }
+  $('msgs').replaceChildren(...hud.messages.slice(-3).map(m => Object.assign(document.createElement('div'), { textContent: m })));
+  drawMeters(hud.meters || []);
+  const cv = hud.cover || [0, 0, 0, 0];
+  $('cover').style.background = `rgba(${cv[0] * 255},${cv[1] * 255},${cv[2] * 255},${cv[3]})`;
+  const over = hud.phase !== 'Running';
+  $('result').hidden = !over;
+  // TestWorld: the result shows 5 s, then AmpedMusic.play("NONE")
+  if (over !== resultShown) { resultShown = over; if (over) setTimeout(() => { if (resultShown && bgmWant?.startsWith('stage')) music(null); }, 5000); }
+  if (over) {
+    const title = { Clear: 'STAGE CLEAR', GameOver: 'GAME OVER', TimeUp: 'TIME UP' }[hud.phase];
+    $('rtitle').textContent = title;
+    const clear = hud.phase === 'Clear';
+    if (clear && story.on && !story.counted) { story.total += hud.score + t + hud.bonus; story.counted = true; }
+    // GameResultPanel: score, rest time and bonus add to the running total
+    $('rsub').textContent = clear ? `SCORE POINT : ${hud.score}\nREST TIME   : ${t}\nBONUS POINT : ${hud.bonus}` + (story.on ? `\nTOTAL       : ${story.total}` : '') : '';
+    // ChallengeResultPanel.Scores: KILL / MUSCLE / COMBO POINT and the total (ranking: online only)
+    const ch = hud.challenge;
+    if (ch) $('rsub').textContent = `KILL POINT   : ${ch.kill}\nMUSCLE POINT : ${ch.muscle}\nCOMBO POINT  : ${ch.combo}\nTOTAL        : ${ch.total}` + (ch.new ? `\nTOUR TOTAL   : ${ch.tour}` : '');
+    const over = hud.phase === 'GameOver' && story.on;
+    if (over !== !$('rimg').hidden) { $('rimg').hidden = !over; if (over) texURL('component/gaiden/badend.tex').then(u => $('rimg').src = u); }
+    if (over) $('rsub').textContent = `CREDIT ${story.credits}`;
+    const keys = over ? (story.credits > 0 ? 'R: 이어하기 (점수 초기화)' : 'R: 처음부터') : 'R: 다시 하기';
+    $('rkeys').textContent = keys + (clear && nextStage() ? ' · Enter: 다음 스테이지' : clear && story.on ? ' · Enter: 엔딩' : '');
+    // versus rules: the StageResult / TeamResult table (place, name, score); a duel round that
+    // has a next one reloads the map 5 s later with the rounds won (bringstr)
+    if (vs) {
+      const team = { team1: '레드', team2: '블루' };
+      const head = vs.team ? (vs.winner ? `${team[vs.winner] || vs.winner} 승리` : '승부 없음') : '';
+      const rows = vs.rows.map(r => `${r.rank > 0 ? r.rank + '위' : '  '} ${r.name}${r.me ? ' (나)' : ''}${vs.team ? ' ' + (team[r.team] || r.team) : ''}  ${r.score}${vs.rule === 'dogfight' ? ` (킬 ${r.kills})` : ''}`);
+      $('rsub').textContent = [head, ...rows].filter(Boolean).join('\n');
+      if (vs.next) {
+        // RuleGameResult.ignoreresult between duel rounds: only TestWorld's GAME SET for 5 s,
+        // no result table; the table comes after the last round (score = rounds won)
+        $('rtitle').textContent = 'GAME SET';
+        $('rsub').textContent = `레드 ${vs.count[0]}승 · 블루 ${vs.count[1]}승`;
+        $('rkeys').textContent = '다음 라운드';
+        if (!window.__nextRound) window.__nextRound = setTimeout(() => { window.__nextRound = null; viewer.set_bring(vs.next); hud = {}; showMap(); }, 5000);
+      }
+    }
+  }
+}
+// GameSetting tour "new challenge" (NewChallengeRule): its 15 maps in order; a cleared stage
+// (ChallengeResult.hasnext) goes on to the next, the last ends the tour
+const NEW_CHALLENGE = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'].map(x => `map/challenge1_${x}.md`);
+let carryChallenge = null; // the next stage goNext moved to
+// stageN.md -> the next stage that exists (stages whose layer view .mpv isn't in the package are skipped)
+function nextStage() {
+  const k = NEW_CHALLENGE.indexOf($('map').value);
+  if (k >= 0) return hud.challenge?.next && NEW_CHALLENGE[k + 1] && files.has(NEW_CHALLENGE[k + 1]) ? NEW_CHALLENGE[k + 1] : null;
+  const m = /^map\/stage(\d+)\.md$/.exec($('map').value);
+  return m && [1, 2, 3, 4, 5, 6, 7, 8, 9].map(d => `map/stage${+m[1] + d}.md`).find(p => files.has(p)) || null;
+}
+async function playable(p) {
+  return map_layer_paths(await bytes(p)).every(v => !v || files.has(v));
+}
+async function goNext() {
+  const k = NEW_CHALLENGE.indexOf($('map').value);
+  if (k >= 0) { carryChallenge = $('map').value = nextStage(); hud = {}; return showMap(); }
+  let m = /^map\/stage(\d+)\.md$/.exec($('map').value);
+  for (let n = m ? +m[1] + 1 : 99; files.has(`map/stage${n}.md`); n++) {
+    if (await playable(`map/stage${n}.md`)) { $('map').value = `map/stage${n}.md`; hud = {}; return showMap(); }
+  }
+}
+addEventListener('keydown', e => {
+  if (!playing || hud.phase === 'Running' || !hud.phase) return;
+  // lobby results (ResultPanel / ChallengeResultPanel on MenuPanel): button 1 / 2 (decide /
+  // cancel, as its InfoBar says) after the panel's lock goes back to the menu — ResultPanel's
+  // last nextProcess -> changeInitialMenu (the title: the offline flow never leaves firsttime),
+  // ChallengeResultPanel -> changeMainMenu (no main menu here: the title too).
+  // Deviation: one press; the original steps through its progress / prize / final panels first
+  if (hud.leave && (viewer.key_buttons(e.code) & 3) && !e.repeat) {
+    e.preventDefault(); hud = {}; playing = false; $('hud').hidden = true; $('result').hidden = true; showTitle();
+    return;
+  }
+  if (e.code === 'Enter' || e.code === 'KeyR') e.preventDefault(); // see GAME START below
+  if (e.code === 'KeyR' && hud.phase === 'GameOver' && story.on) {
+    if (story.credits > 0) { story.credits--; story.total = 0; hud = {}; showMap(); } else restartStory();
+    return;
+  }
+  if (e.code === 'KeyR') { hud = {}; showMap(); }
+  if (e.code === 'Enter' && hud.phase === 'Clear' && nextStage()) goNext();
+  else if (e.code === 'Enter' && hud.phase === 'Clear' && story.on && $('story').hidden) showEpilogue();
+});
+
+(function frame() {
+  // OptionPanel RESOLUTION (Config.resw / resh): the drawing buffer's size; CSS letterboxes it
+  // 4:3 in the page (Deviation: the original makes a window of that size; see `resolution`)
+  // nothing saved: default_reso() (1024 x 768, Deviation: the original starts at 640 x 480)
+  const [w, h] = resolution(config.reso ?? default_reso());
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  // window.__hold (dev): the loop only renders; tests step the game via viewer.update
+  if (playing) {
+    if (!window.__hold && !paused) play(clock(performance.now()));
+    drawHud();
+    for (const line of viewer.take_sounds().split('\n')) if (line) { const [p, v, pi] = line.split('\t'); playSound(p, +v, +pi); }
+  } else if (!drag) yaw += 0.003;
+  if (menu) viewer.menu_tick(performance.now());
+  viewer.render(w, h, yaw, pitch, animFrame());
+  requestAnimationFrame(frame);
+})();
+// ---- Game menus: MenuPanel (menu.rs) — TitlePanel / PlayerEditPanel / OptionPanel ----
+// The menus are painted by the viewer on the 2D layer and answer keys with commands. UserData per
+// style (head, face, body, equipment, outfit) is kept in this browser (localStorage), on top of
+// the package's userdata file; Game.currentstyle is the style last played.
+const styleList = () => viewer.styles_list().split('\n').filter(Boolean).map(l => { const [dir, name, lv] = l.split('\t'); return { dir, name, lv: lv.split(',').map(Number) }; });
+function partList(dir, sub, ext) {
+  const pre = `player/style/${dir}/${sub}/`;
+  return [...files.keys()].filter(k => k.startsWith(pre) && k.endsWith(ext)).map(k => k.slice(pre.length)).sort();
+}
+function user(dir = store('currentstyle', null)) {
+  const all = store('userdata', {});
+  const u = all[dir] || {};
+  const pick = (v, list) => list.includes(v) ? v : list[0] || '';
+  return { body: pick(u.body, partList(dir, 'body', '.body')), face: pick(u.face, partList(dir, 'face', '.face')), head: u.head === '' ? '' : pick(u.head, partList(dir, 'head', '.prm')), equipment: u.equipment || '', outfit: u.outfit || '' };
+}
+function saveUser(dir, u) { const all = store('userdata', {}); all[dir] = u; save('userdata', all); save('currentstyle', dir); }
+// the dev sidebar's selects still drive the model preview and the map load
+function applyUser(dir, u) {
+  // the part lists, then one character load (style.onchange's own load ran concurrently with this
+  // one: two clears and two sets of draws and textures for every menu change)
+  $('style').value = dir; fillParts();
+  $('body').value = u.body; $('face').value = u.face; $('head').value = u.head;
+  showCharacter();
+}
+// MenuPanel.start -> TitlePanel
+async function showTitle() {
+  music('menu.mp3'); // AmpedContainer: menus play AmpedMusic.play(0)
+  $('map').value = '';
+  await loadCommon();
+  const styles = styleList();
+  // the styles' preview pictures for the Style box (2D textures by resource path)
+  await Promise.all(styles.map(async s => {
+    const k = `player/style/${s.dir}/preview.tex`, b = files.has(k) && await bytes(k);
+    if (b) try { viewer.load_ui_texture('/' + k, b); } catch (e) { console.warn(k, e); }
+  }));
+  const parts = styles.map(s => [s.dir, partList(s.dir, 'head', '.prm').join(','), partList(s.dir, 'face', '.face').join(','), partList(s.dir, 'body', '.body').join(',')].join('\t')).join('\n');
+  const users = Object.entries(store('userdata', {})).map(([d, u]) => [d, u.head ?? '', u.face ?? '', u.body ?? '', u.equipment ?? '', u.outfit ?? ''].join('\t')).join('\n');
+  const c = config, cfg = [c.turbo, c.credit, c.outline ?? 1, c.shadow ?? 1, c.reso ?? default_reso(), c.fullscreen ? 1 : 0].join('\t');
+  viewer.set_outlines(!!(c.outline ?? 1)); // Config.Graphics.outline
+  viewer.set_shadows(!!(c.shadow ?? 1)); // Config.Graphics.shadow
+  viewer.menu_open(parts, users, cfg, store('currentstyle', ''), performance.now());
+  menu = true;
+}
+function closeMenu() { if (menu) { viewer.menu_close(); menu = false; } }
+addEventListener('keydown', e => {
+  if (!menu || !$('story').hidden || e.repeat) return;
+  const out = viewer.menu_key(e.code, performance.now());
+  // the menu's keys keep their default actions off (an Enter left to its default action once set
+  // off an endless stream of trusted keydown events in headless Chrome)
+  if (out || /^(Arrow|Enter|NumpadEnter)/.test(e.code) || isGameKey(e.code)) e.preventDefault();
+  // a key the menu took (e.g. "/" or "`" given to a CONTROL row) does not also open the help
+  // or the sidebar below
+  if (out) e.stopImmediatePropagation();
+  for (const line of out.split('\n')) {
+    const [cmd, ...a] = line.split('\t');
+    const u = () => ({ head: a[1], face: a[2], body: a[3], equipment: a[4], outfit: a[5] });
+    if (cmd === 'sound') playSound(a[0], 1, 1);
+    else if (cmd === 'look') { saveUser(a[0], u()); applyUser(a[0], u()); }
+    else if (cmd === 'save') saveUser(a[0], u());
+    else if (cmd === 'config') {
+      const [turbo, credit, outline, shadow, reso, fullscreen] = a.map(Number);
+      Object.assign(config, { turbo, credit, outline, shadow, reso, fullscreen: !!fullscreen });
+      save('config', config);
+      viewer.set_outlines(!!outline);
+      viewer.set_shadows(!!shadow);
+      // RESOLUTION (GraphicsConfig.valueChanged -> Game.makeWindow): frame() sizes the canvas
+      if (!!fullscreen !== !!document.fullscreenElement) (fullscreen ? document.documentElement.requestFullscreen?.() : document.exitFullscreen?.())?.catch?.(() => {});
+    } else if (cmd === 'keys') {
+      // KeySelecter.keyinput -> Config.Key.update (the viewer has it already) + saveConfig
+      config.keys = a.map(Number);
+      save('config', config);
+      showKeys();
+    } else if (cmd === 'open') window.open(a[0], '_blank', 'noopener');
+    else if (cmd === 'quit') window.close();
+    else if (cmd === 'start') {
+      // SelectHandler: GaidenManager.start(true) -> prologue -> stage1
+      closeMenu(); story.on = false; $('map').value = 'map/stage1.md'; hud = {}; showPrologue();
+    }
+  }
+});
+// the dev sidebar: shown with ?dev (or until a resource folder is chosen); ` toggles it
+const dev = new URLSearchParams(location.search).has('dev');
+addEventListener('keydown', e => { if (e.code === 'Backquote' && !isGameKey(e.code)) document.querySelector('aside').hidden ^= true; });
+// "/" (or "?") toggles the controls help (unless "/" is a button key); Esc closes it
+addEventListener('keydown', e => {
+  if (e.code === 'Slash' && !isGameKey(e.code)) { $('help').hidden ^= true; e.preventDefault(); }
+  else if (e.code === 'Escape' && !$('help').hidden) $('help').hidden = true;
+});
+
+// Local dev: ?res=<url> serves a resource dir that has a manifest.txt (one relative path per line).
+const resUrl = new URLSearchParams(location.search).get('res');
+if (resUrl) {
+  const list = (await (await fetch(`${resUrl}/manifest.txt`)).text()).split('\n').filter(Boolean);
+  files = new Map(list.map(p => [p, async () => (await fetch(`${resUrl}/${encodeURI(p)}`)).arrayBuffer()]));
+  loaded();
+  if (!dev) document.querySelector('aside').hidden = true;
+  loadCommon().then(showTitle);
+}
+</script>
+</body>
+</html>
